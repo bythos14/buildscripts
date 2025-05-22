@@ -439,7 +439,6 @@ set(common_gcc_configure_args
     --disable-libstdcxx-pch
     --disable-nls
     --disable-shared
-    --disable-tls
     --with-gnu-as
     --with-gnu-ld
     --with-newlib
@@ -499,7 +498,7 @@ ExternalProject_add(vita-headers
     #     python <SOURCE_DIR>/build.py <BINARY_DIR>
     CONFIGURE_COMMAND ${vita_libs_gen_command}-2 -yml=<SOURCE_DIR>/db -output=<BINARY_DIR>
     BUILD_COMMAND ARCH=${binutils_prefix}
-        make
+        $(MAKE)
     # Copy the generated .a files to the install directory
     # INSTALL_COMMAND ${CMAKE_COMMAND} -DGLOB_PATTERN=<BINARY_DIR>/*/*/*a
     INSTALL_COMMAND ${CMAKE_COMMAND} -DGLOB_PATTERN=<BINARY_DIR>/*.a
