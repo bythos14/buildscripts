@@ -11,11 +11,234 @@ index 7468a20bd..3496590c4 100644
    arm_cpu_builtins (pfile);
  }
  
+diff --git a/gcc/config/arm/arm-opts.h b/gcc/config/arm/arm-opts.h
+index deaa2a043..b26e75f6d 100644
+--- a/gcc/config/arm/arm-opts.h
++++ b/gcc/config/arm/arm-opts.h
+@@ -67,6 +67,7 @@ enum arm_tp_type {
+ /* Which TLS scheme to use.  */
+ enum arm_tls_type {
+   TLS_GNU,
+-  TLS_GNU2
++  TLS_GNU2,
++  TLS_VITA
+ };
+ #endif
+diff --git a/gcc/config/arm/arm.c b/gcc/config/arm/arm.c
+index db37e2b8e..bf7c7482e 100644
+--- a/gcc/config/arm/arm.c
++++ b/gcc/config/arm/arm.c
+@@ -83,6 +83,9 @@ static std::string arm_last_printed_fpu_string;
+ 
+ void (*arm_lang_output_object_attributes_hook)(void);
+ 
++#define ARM_VITA_TLS_DESC_PREFIX "__tls_desc_"
++static vec<tree, va_heap> vita_tls_var_vec;
++
+ struct four_ints
+ {
+   int i[4];
+@@ -676,6 +679,9 @@ static const struct attribute_spec arm_attribute_table[] =
+ #undef TARGET_MIN_ANCHOR_OFFSET
+ #define TARGET_MIN_ANCHOR_OFFSET -4088
+ 
++#undef TARGET_USE_ANCHORS_FOR_SYMBOL_P
++#define TARGET_USE_ANCHORS_FOR_SYMBOL_P arm_vita_use_anchors_for_symbol_p
++
+ #undef TARGET_SCHED_ISSUE_RATE
+ #define TARGET_SCHED_ISSUE_RATE arm_issue_rate
+ 
+@@ -7778,6 +7784,18 @@ arm_function_ok_for_sibcall (tree decl, tree exp)
+ 
+ /* Addressing mode support functions.  */
+ 
++static bool 
++arm_vita_use_anchors_for_symbol_p (const_rtx x)
++{
++  tree decl = SYMBOL_REF_DECL (x);
++  if (TARGET_VITA_TLS && decl && DECL_THREAD_LOCAL_P (decl))
++    {
++      return false;
++    }
++
++  return default_use_anchors_for_symbol_p (x);
++}
++
+ /* Return nonzero if X is a legitimate immediate operand when compiling
+    for PIC.  We know that X satisfies CONSTANT_P and flag_pic is true.  */
+ int
+@@ -9064,6 +9082,39 @@ arm_call_tls_get_addr (rtx x, rtx reg, rtx *valuep, int reloc)
+   return insns;
+ }
+ 
++static rtx_insn *
++arm_vita_call_tls_get_addr (rtx x, rtx reg, rtx *valuep)
++{
++  rtx sym_ref;
++  const char *symbol;
++
++  if (!SYMBOL_REF_DECL (x))
++    internal_error ("tls symbol_ref (%s) does not have an associated decl", XSTR (x, 0));
++
++  if (!DECL_ASSEMBLER_NAME_SET_P (SYMBOL_REF_DECL (x)))
++    internal_error ("decl of tls symbol_ref (%s) does not have a DECL_ASSEMBLER_NAME", XSTR (x, 0));
++
++  start_sequence ();
++
++  symbol = ggc_strdup (xasprintf (ARM_VITA_TLS_DESC_PREFIX"%s", IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (SYMBOL_REF_DECL (x)))));
++
++  sym_ref = gen_rtx_SYMBOL_REF (Pmode, symbol);
++  
++  if (reg == NULL_RTX)
++    reg = gen_reg_rtx (Pmode);
++
++  emit_move_insn (reg, sym_ref);
++
++  *valuep = emit_library_call_value (get_tls_get_addr (), NULL_RTX,
++				     LCT_PURE, /* LCT_CONST?  */
++				     Pmode, reg, Pmode);
++
++  rtx_insn *insns = get_insns ();
++  end_sequence ();
++
++  return insns;
++}
++
+ static rtx
+ arm_tls_descseq_addr (rtx x, rtx reg)
+ {
+@@ -9095,6 +9146,15 @@ legitimize_tls_address (rtx x, rtx reg)
+   rtx_insn *insns;
+   unsigned int model = SYMBOL_REF_TLS_MODEL (x);
+ 
++  if (TARGET_VITA_TLS)
++    {
++      insns = arm_vita_call_tls_get_addr (x, reg, &ret);
++      dest = gen_reg_rtx (Pmode);
++      emit_libcall_block (insns, dest, ret, x);
++
++      return dest;
++    }
++
+   switch (model)
+     {
+     case TLS_MODEL_GLOBAL_DYNAMIC:
+@@ -28197,11 +28257,59 @@ arm_file_start (void)
+   default_file_start ();
+ }
+ 
++/* Output the .tdesc section, with __tls_desc_ symbols for all TLS symbols 
++   defined in this compilation unit. */
++
++static void 
++arm_vita_generate_tdesc_section ()
++{
++  tree decl;
++  unsigned idx;
++  const char *name;
++  char *desc_label;
++  size_t desc_label_size;
++
++  if (!vita_tls_var_vec.exists ())
++    return;
++
++  desc_label_size = 64;
++  desc_label = reinterpret_cast<char *> (ggc_internal_alloc (desc_label_size));
++
++  for (idx = 0; idx < vita_tls_var_vec.length (); idx++)
++    {
++      decl = vita_tls_var_vec[idx];
++      name = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl));
++      if (desc_label_size < (strlen (name) + strlen (ARM_VITA_TLS_DESC_PREFIX) + 1))
++        {
++          desc_label_size = ((strlen (name) + strlen (ARM_VITA_TLS_DESC_PREFIX) + 16) + 0xF) & ~0xF; // Allocate in units of 16
++          desc_label = reinterpret_cast<char *> (ggc_realloc (desc_label, desc_label_size));
++        }
++      snprintf (desc_label, desc_label_size, ARM_VITA_TLS_DESC_PREFIX"%s", name);
++
++      switch_to_section (get_section (".tdesc", SECTION_WRITE, NULL));
++      asm_fprintf (asm_out_file, "\t.global %s\n", desc_label);
++      asm_fprintf (asm_out_file, "\t.type %s, %%object\n", desc_label);
++      asm_fprintf (asm_out_file, "\t.size %s, 8\n", desc_label);
++      ASM_OUTPUT_LABEL (asm_out_file, desc_label);
++      asm_fprintf (asm_out_file, "\t.word\t0xFFFFFFFF\n"); // modid
++      asm_fprintf (asm_out_file, "\t.word\t%s(tpoff) - 8\n", name); // Offset into module TLS block - TCB_SIZE (8) from binutils
++    }
++
++    ggc_free (desc_label);
++    vita_tls_var_vec.release ();
++}
++
++
+ static void
+ arm_file_end (void)
+ {
+   int regno;
+ 
++  if (TARGET_VITA_TLS)
++    {
++      arm_vita_generate_tdesc_section ();
++    }
++
+   if (NEED_INDICATE_EXEC_STACK)
+     /* Add .note.GNU-stack.  */
+     file_end_indicate_exec_stack ();
+@@ -28226,6 +28334,30 @@ arm_file_end (void)
+     }
+ }
+ 
++/* Determine if a decl is a TLS variable defined in this compilation unit.
++   If so, add to tls_var_vec for TLS desc generation in file_end */
++
++static void
++arm_vita_track_tls_variable (tree decl)
++{
++  if (TREE_CODE (decl) != VAR_DECL)
++    return;
++
++  if (!DECL_THREAD_LOCAL_P (decl))
++    return;
++
++  if (DECL_EXTERNAL (decl))
++    return;
++
++  if (!TREE_STATIC (decl))
++    return;
++
++  if (!vita_tls_var_vec.exists ())
++    vita_tls_var_vec.create (1);
++
++  vita_tls_var_vec.safe_push (decl);
++}
++
+ #ifndef ARM_PE
+ /* Symbols in the text segment can be accessed without indirecting via the
+    constant pool; it may take an extra binary operation, but this is still
+@@ -28239,6 +28371,11 @@ arm_encode_section_info (tree decl, rtx rtl, int first)
+   if (optimize > 0 && TREE_CONSTANT (decl))
+     SYMBOL_REF_FLAG (XEXP (rtl, 0)) = 1;
+ 
++  if (TARGET_VITA_TLS) 
++    {
++      arm_vita_track_tls_variable (decl);
++    }
++
+   default_encode_section_info (decl, rtl, first);
+ }
+ #endif /* !ARM_PE */
 diff --git a/gcc/config/arm/arm.h b/gcc/config/arm/arm.h
-index 30e1d6dc9..bd5f7b19c 100644
+index 30e1d6dc9..6f9f3dd29 100644
 --- a/gcc/config/arm/arm.h
 +++ b/gcc/config/arm/arm.h
-@@ -731,6 +731,10 @@ extern const int arm_arch_cde_coproc_bits[];
+@@ -162,6 +162,7 @@ emission of floating point pcs attributes.  */
+ #define TARGET_HARD_TP			(target_thread_pointer == TP_CP15)
+ #define TARGET_SOFT_TP			(target_thread_pointer == TP_SOFT)
+ #define TARGET_GNU2_TLS			(target_tls_dialect == TLS_GNU2)
++#define TARGET_VITA_TLS			(target_tls_dialect == TLS_VITA)
+ 
+ /* Only 16-bit thumb code.  */
+ #define TARGET_THUMB1			(TARGET_THUMB && !arm_arch_thumb2)
+@@ -731,6 +732,10 @@ extern const int arm_arch_cde_coproc_bits[];
  #define WCHAR_TYPE_SIZE BITS_PER_WORD
  #endif
  
@@ -26,7 +249,7 @@ index 30e1d6dc9..bd5f7b19c 100644
  /* Sized for fixed-point types.  */
  
  #define SHORT_FRACT_TYPE_SIZE 8
-@@ -1996,7 +2000,7 @@ enum arm_auto_incmodes
+@@ -1996,7 +2001,7 @@ enum arm_auto_incmodes
  /* signed 'char' is most compatible, but RISC OS wants it unsigned.
     unsigned is probably best, but may break some code.  */
  #ifndef DEFAULT_SIGNED_CHAR
@@ -36,7 +259,7 @@ index 30e1d6dc9..bd5f7b19c 100644
  
  /* Max number of bytes we can move from memory to memory
 diff --git a/gcc/config/arm/arm.opt b/gcc/config/arm/arm.opt
-index cd3d8e1be..523b92aa1 100644
+index cd3d8e1be..1dd72758e 100644
 --- a/gcc/config/arm/arm.opt
 +++ b/gcc/config/arm/arm.opt
 @@ -30,6 +30,9 @@ const char *x_arm_cpu_string
@@ -49,6 +272,25 @@ index cd3d8e1be..523b92aa1 100644
  Enum
  Name(tls_type) Type(enum arm_tls_type)
  TLS dialect to use:
+@@ -40,6 +43,9 @@ Enum(tls_type) String(gnu) Value(TLS_GNU)
+ EnumValue
+ Enum(tls_type) String(gnu2) Value(TLS_GNU2)
+ 
++EnumValue
++Enum(tls_type) String(vita) Value(TLS_VITA)
++
+ mabi=
+ Target RejectNegative Joined Enum(arm_abi_type) Var(arm_abi) Init(ARM_DEFAULT_ABI)
+ Specify an ABI.
+@@ -203,7 +209,7 @@ Target Report Mask(INTERWORK)
+ Support calls between Thumb and ARM instruction sets.
+ 
+ mtls-dialect=
+-Target RejectNegative Joined Enum(tls_type) Var(target_tls_dialect) Init(TLS_GNU)
++Target RejectNegative Joined Enum(tls_type) Var(target_tls_dialect) Init(TLS_VITA)
+ Specify thread local storage scheme.
+ 
+ mtp=
 diff --git a/gcc/gcc.c b/gcc/gcc.c
 index 9f790db0d..27a38bb02 100644
 --- a/gcc/gcc.c
