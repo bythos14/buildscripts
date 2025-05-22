@@ -1,12 +1,27 @@
-diff -Nru a/src/binutils/ld/scripttempl/elf.sc b/src/binutils/ld/scripttempl/elf.sc
---- a/src/binutils/ld/scripttempl/elf.sc	2018-07-11 17:43:55.000000000 +0200
-+++ b/src/binutils/ld/scripttempl/elf.sc	2018-12-29 19:53:29.747662203 +0100
-@@ -580,6 +580,8 @@
-   ${CREATE_SHLIB+${RELOCATING+. = ${SHLIB_DATA_ADDR-${DATA_SEGMENT_ALIGN}};}}
-   ${CREATE_PIE+${RELOCATING+. = ${SHLIB_DATA_ADDR-${DATA_SEGMENT_ALIGN}};}}
+diff -Nru a/src/binutils/bfd/elf32-arm.c b/src/binutils/bfd/elf32-arm.c
+--- a/src/binutils/bfd/elf32-arm.c	2020-01-18 09:55:47.000000000 -0400
++++ b/src/binutils/bfd/elf32-arm.c	2025-05-20 21:35:58.888642900 -0400
+@@ -20389,11 +20389,7 @@
+ #define ELF_ARCH			bfd_arch_arm
+ #define ELF_TARGET_ID			ARM_ELF_DATA
+ #define ELF_MACHINE_CODE		EM_ARM
+-#ifdef __QNXTARGET__
+ #define ELF_MAXPAGESIZE			0x1000
+-#else
+-#define ELF_MAXPAGESIZE			0x10000
+-#endif
+ #define ELF_MINPAGESIZE			0x1000
+ #define ELF_COMMONPAGESIZE		0x1000
  
-+  /* Hacky hackity hack. Need this because otherwise data segment is not aligned enough. */
-+  . = ALIGN(0x10000);
-   /* Exception handling  */
-   .eh_frame     ${RELOCATING-0} : ONLY_IF_RW { KEEP (*(.eh_frame)) ${RELOCATING+*(.eh_frame.*)} }
-   .gnu_extab    ${RELOCATING-0} : ONLY_IF_RW { *(.gnu_extab) }
+diff -Nru a/src/binutils/ld/scripttempl/elf.sc b/src/binutils/ld/scripttempl/elf.sc
+--- a/src/binutils/ld/scripttempl/elf.sc	2020-01-18 09:55:48.000000000 -0400
++++ b/src/binutils/ld/scripttempl/elf.sc	2025-05-20 21:30:41.178642900 -0400
+@@ -576,7 +576,7 @@
+ 
+   ${RELOCATING+/* Adjust the address for the data segment.  We want to adjust up to
+      the same address within the page on the next page up.  */}
+-  ${CREATE_SHLIB-${CREATE_PIE-${RELOCATING+. = ${DATA_ADDR-${DATA_SEGMENT_ALIGN}};}}}
++  ${CREATE_SHLIB-${CREATE_PIE-${RELOCATING+. = ALIGN(CONSTANT(MAXPAGESIZE));}}}
+   ${CREATE_SHLIB+. = ${SHLIB_DATA_ADDR-${DATA_SEGMENT_ALIGN}};}
+   ${CREATE_PIE+. = ${SHLIB_DATA_ADDR-${DATA_SEGMENT_ALIGN}};}
+ 
